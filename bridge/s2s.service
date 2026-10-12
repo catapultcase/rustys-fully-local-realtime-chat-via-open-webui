@@ -1,0 +1,21 @@
+[Unit]
+# Deployed to /etc/systemd/system/s2s.service. Set <user> (README.md).
+Description=speech-to-speech Realtime voice bridge for Open WebUI (README.md)
+After=network-online.target llama-swap.service
+Wants=network-online.target llama-swap.service
+
+[Service]
+User=<user>
+Group=<user>
+WorkingDirectory=/opt/llm/s2s
+# Same card rules as llama-swap.service: pin the bridge to the same card.
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=CUDA_VISIBLE_DEVICES=0
+ExecStart=/opt/llm/s2s/run.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/opt/llm/logs/s2s.log
+StandardError=append:/opt/llm/logs/s2s.log
+
+[Install]
+WantedBy=multi-user.target

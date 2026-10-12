@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Patch the installed speech-to-speech for Open WebUI's Realtime call. Two fixes, both errors that end a call.
+
+First: a follow-up during a hand-off is answered, not refused.
+
+Open WebUI's Realtime call asks for a response (response.create) after every finished user turn. When the
+user speaks while generate_chat_completion is still running, the bridge refused it: an error event
+(function_call_output_pending, or the LLM's "Cannot generate a response while function call outputs are
+pending"), and Open WebUI ends the call on ANY provider error ("Voice provider rejected a request").
+Seen 2026-10-11: "Is it running?" asked during a hand-off ended the call.
+
+The patch generates anyway, on the per-response copy of the chat, with each pending call given a placeholder
+result saying the chat model is still working. The voice model can then say "still on it". The real
+conversation is untouched, so the real result completes the call as before.
+
+Second fix in the same run: Mute. Open WebUI sends input_audio_buffer.clear on Mute; the bridge has no
+handler for it ("Unknown client event type"), answered with an error, and every Mute ended the call
+(2026-10-11). The router now acknowledges it with input_audio_buffer.cleared, as OpenAI's API does;
+muting already stops the audio, so there is nothing else to clear.
+
+Third: a hand-off's answer is spoken directly. Open WebUI asks for a response to speak each finished
+result (metadata call_id); unpatched, the voice model (Qwen3.5-9B) re-read the whole call and rewrote the
+answer before Kokoro started, ~1.2-1.6 s after the text was already in the chat (2026-10-11), and even
+with the word-for-word prompt it could drift. A completed result's answer now goes through the bridge's
+normal output path (sentence chunks, history, timings) without the LLM call. A failed result still goes
+to the model, which explains the failure as Open WebUI asks.
+
+Idempotent; re-run after every reinstall of speech-to-speech (README.md):
+  /opt/llm/s2s/venv/bin/python /opt/llm/s2s/patch-bridge.py
+"""
+
+import pathlib
+import re
+import sys
+
+import speech_to_speech
+
+ROOT = pathlib.Path(speech_to_speech.__file__).parent
+MARK = "HOMELAB PATCH followup-during-handoff"
+DIRECT_MARK = "HOMELAB PATCH direct-answer"
+
+CHAT_METHOD = f'''
+    def fill_pending_tool_outputs(self) -> None:
+        """{MARK}: give every pending call a placeholder result, on a per-response copy only."""
+        with self._lock:
+            call_ids = list(self._pending_tool_calls)
+        for call_id in call_ids:
+            self.append_tool_output(
+                call_id,
+                RealtimeConversationItemFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=call_id,
+                    output=json.dumps({{
+                        "status": "in_progress",
+                        "note": "The chat model is still working on this request. Its answer will arrive "
+                        "separately. Do not answer it yourself and do not call the tool for it again.",
+                    }}),
+                ),
+            )
+
+    def has_pending_tool_calls(self) -> bool:'''
+
+GUARD = re.compile(
+    r"(?P<head>\n(?P<indent>[ ]+)if not (?:is_out_of_band\(response\)|out_of_band) and active_chat\.has_pending_tool_calls\(\):\n)"
+    r"[ ]+yield EndOfResponse\((?:.|\n)*?\n[ ]+\)\n[ ]+return\n"
+)
+
+REFUSAL = re.compile(
+    r"(?P<head>\n(?P<indent>[ ]+)if candidate_chat\.has_pending_tool_calls\(\):\n)"
+    r"[ ]+return self\.make_error\(\n[ ]+message=\"Cannot create a response while function call outputs are pending\.\",\n"
+    r"[ ]+_type=\"function_call_output_pending\",\n[ ]+\)\n"
+)
+
+
+def patch(path, fn, mark=MARK):
+    text = path.read_text()
+    if mark in text:
+        print("already patched:", path.relative_to(ROOT))
+        return
+    new = fn(text)
+    if new == text:
+        sys.exit("pattern not found in %s - speech-to-speech changed; re-derive the patch" % path)
+    path.write_text(new)
+    print("patched:", path.relative_to(ROOT))
+
+
+def chat(text):
+    return text.replace("\n    def has_pending_tool_calls(self) -> bool:", CHAT_METHOD, 1)
+
+
+def guards(text, expect):
+    new, n = GUARD.subn(
+        lambda m: m["head"] + m["indent"] + "    active_chat.fill_pending_tool_outputs()  # " + MARK + "\n", text)
+    if n != expect:
+        sys.exit("expected %d guard(s), found %d" % (expect, n))
+    return new
+
+
+def refusal(text):
+    new, n = REFUSAL.subn(lambda m: m["head"] + m["indent"] + "    pass  # " + MARK + "\n", text)
+    if n != 1:
+        sys.exit("expected 1 refusal, found %d" % n)
+    return new
+
+
+CLEAR = f'''
+    if raw.get("type") == "input_audio_buffer.clear":  # {MARK}: Open WebUI's Mute
+        from openai.types.realtime.input_audio_buffer_cleared_event import InputAudioBufferClearedEvent
+
+        await send_correlated(
+            [InputAudioBufferClearedEvent(event_id=service._next_event_id(), type="input_audio_buffer.cleared")]
+        )
+        return
+
+    event = service.parse_client_event(raw)'''
+
+
+def clear(text):
+    return text.replace("\n    event = service.parse_client_event(raw)", CLEAR, 1)
+
+
+DIRECT_HELPER = f'''
+
+def _homelab_direct_answer(response, chat):
+    """{DIRECT_MARK}: the answer of a completed generate_chat_completion result this response should speak, or None."""
+    import json as _json
+
+    from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCallOutput
+
+    metadata = getattr(response, "metadata", None) or {{}}
+    call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
+    if not call_id or getattr(response, "instructions", None):
+        return None
+    for item in reversed(chat.copy().buffer):
+        if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id == call_id:
+            try:
+                result = _json.loads(item.output)
+            except (TypeError, ValueError):
+                return None
+            answer = result.get("answer") if isinstance(result, dict) else None
+            if isinstance(answer, str):
+                # Open WebUI labels earlier spoken replies in the chat model's history with this line, and
+                # the chat model copied it into its own answer, which was then read aloud (2026-10-11).
+                answer = "\\n".join(
+                    line for line in answer.splitlines()
+                    if not line.strip().startswith("[Historical voice assistant transcript")
+                ).strip()
+            if result.get("status") == "completed" and isinstance(answer, str) and answer:
+                return answer
+            return None
+    return None
+
+
+class BaseOpenAICompatibleHandler'''
+
+DIRECT_CALL = f'''        direct = _homelab_direct_answer(response, original_chat)  # {DIRECT_MARK}: speak the answer as written
+        if direct is not None:
+            from openai.types.realtime.realtime_conversation_item_assistant_message import Content as _Content
+
+            def _direct_events(_api_response):
+                yield TextDelta(text=direct)
+                yield AssistantMessage(content=[_Content(type="output_text", text=direct)])
+                yield Usage(input_tokens=0, output_tokens=0)
+                yield ProviderResponseEnd()
+
+            yield from self._generate(
+                active_chat,
+                original_chat,
+                turn,
+                optional_kwargs,
+                serialize_fn=lambda _chat: ["direct"],
+                request_fn=lambda _api_input, _kwargs: None,
+                event_iterator_fn=_direct_events,
+            )
+            return
+        yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
+'''
+
+
+def direct(text):
+    call = "        yield from self._generate(active_chat, original_chat, turn, optional_kwargs)\n"
+    cls = "\n\nclass BaseOpenAICompatibleHandler"
+    if text.count(call) != 1 or text.count(cls) != 1:
+        sys.exit("direct-answer anchors not found once - speech-to-speech changed; re-derive the patch")
+    return text.replace(cls, DIRECT_HELPER, 1).replace(call, DIRECT_CALL, 1)
+
+
+patch(ROOT / "LLM/chat.py", chat)
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", lambda t: guards(t, 2))
+patch(ROOT / "LLM/language_model.py", lambda t: guards(t, 1))
+patch(ROOT / "api/openai_realtime/handlers/response.py", refusal)
+patch(ROOT / "api/openai_realtime/websocket_router.py", clear)
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", direct, DIRECT_MARK)

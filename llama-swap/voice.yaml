@@ -1,0 +1,59 @@
+# The voice entries from our llama-swap.yaml (README.md). Merge into yours: the three models under models:,
+# the group under routing:, the preload under hooks:. Paths are ours (/opt/llm); change to suit.
+# ${llama-server} is a macro: "/path/to/llama-server --port ${PORT} --host 127.0.0.1".
+
+models:
+  "kokoro-82m":
+    name: "Kokoro-82M TTS"
+    description: "TTS, 24 kHz WAV, /v1/audio/speech, GPU"
+    cmd: |
+      /opt/llm/kokoro/venv312/bin/python /opt/llm/kokoro-server.py --port ${PORT}
+    ttl: 0
+  # Speech-to-text on /v1/audio/transcriptions. Runs in the bridge's venv (nano-parakeet, torch). Parakeet
+  # returns nothing for silence and room noise, so it needs no VAD in front: Whisper turned noise into
+  # "Thank you." and "sad music", and the chat model answered them.
+  "parakeet-tdt-0.6b-v3":
+    name: "Parakeet TDT 0.6B v3 STT"
+    description: "STT on /v1/audio/transcriptions, GPU"
+    cmd: |
+      /opt/llm/s2s/venv/bin/python /opt/llm/parakeet-server.py --port ${PORT}
+    ttl: 0
+  # The voice model: small talk, and the hand-off to the chat model. Thinking off: Qwen3.5 has no effort
+  # levels, and a --reasoning-budget cap spilled </think> and half a tool call into the spoken reply.
+  # KV q8_0: at f16 Parakeet hit CUDA OOM on a 12 GB card once Kokoro grew to 1.3 GB.
+  "qwen3.5-9b":
+    name: "Qwen3.5-9B UD-Q4_K_XL voice"
+    description: "the Realtime bridge's voice model, thinking off"
+    cmd: |
+      ${llama-server}
+      --model /opt/llm/models/Qwen3.5-9B/Qwen3.5-9B-UD-Q4_K_XL.gguf
+      -a qwen3.5-9b
+      --chat-template-kwargs '{"enable_thinking":false}'
+      -ngl 99
+      -fa on
+      -c 32768
+      -ctk q8_0
+      -ctv q8_0
+      -np 1
+    ttl: 0
+
+# All three stay loaded side by side: a request to one never evicts another.
+routing:
+  router:
+    use: group
+    settings:
+      groups:
+        "voice":
+          swap: false
+          exclusive: false
+          members:
+            - "kokoro-82m"
+            - "parakeet-tdt-0.6b-v3"
+            - "qwen3.5-9b"
+
+hooks:
+  on_startup:
+    preload:
+      - "kokoro-82m"
+      - "parakeet-tdt-0.6b-v3"
+      - "qwen3.5-9b"
