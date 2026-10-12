@@ -150,7 +150,8 @@ beside the speech models on 12 GB. On a 24-32 GB card it would.
 
 - **Speech starts only when the chat model's answer is complete.** Open WebUI sends the hand-off result
   to the voice side only once it's finished, so a long answer means silence while the text writes itself
-  into the chat. We've asked upstream to stream partial results so speech can start on the first sentence.
+  into the chat. Requested upstream: [open-webui#32311](https://github.com/open-webui/open-webui/issues/32311),
+  stream partial results so speech starts on the first sentence.
 - **One call at a time**; the bridge refuses a second.
 - Parakeet's weak spot is unusual names.
 - Tested only on x86 Linux with NVIDIA.
