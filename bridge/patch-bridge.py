@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch the installed speech-to-speech for Open WebUI's Realtime call. Two fixes, both errors that end a call.
+"""Patch the installed speech-to-speech for Open WebUI's Realtime call. Four fixes.
 
 First: a follow-up during a hand-off is answered, not refused.
 
@@ -24,6 +24,9 @@ answer before Kokoro started, ~1.2-1.6 s after the text was already in the chat 
 with the word-for-word prompt it could drift. A completed result's answer now goes through the bridge's
 normal output path (sentence chunks, history, timings) without the LLM call. A failed result still goes
 to the model, which explains the failure as Open WebUI asks.
+
+Fourth: Open WebUI's "[Historical voice assistant transcript...]" label lines are stripped from a hand-off's
+answer before it is spoken; the chat model copied them from its history and Kokoro read them aloud.
 
 Idempotent; re-run after every reinstall of speech-to-speech (README.md):
   /opt/llm/s2s/venv/bin/python /opt/llm/s2s/patch-bridge.py
