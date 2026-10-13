@@ -471,3 +471,28 @@ def stream_interrupt_helper(text):
 
 patch(ROOT / "api/openai_realtime/websocket_router.py", stream_interrupt_router, STREAM_INTERRUPT_MARK)
 patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_interrupt_helper, STREAM_INTERRUPT_MARK)
+
+
+# Eighth: streamed text is spoken in whole sentences, by the TTS's own splitter. Open WebUI releases text at byte
+# points (its lookahead), which can fall mid-word; the rest waits for more text or the final result (2026-10-13).
+STREAM_SEGMENT_MARK = "HOMELAB PATCH stream-segment"
+STREAM_SEGMENT_OLD = '''            text, stream["pending"] = stream["pending"], ""
+'''
+STREAM_SEGMENT_NEW = f'''            from speech_to_speech.LLM.utils import sent_tokenize_preserving_markdown_code  # {STREAM_SEGMENT_MARK}
+            from nltk import sent_tokenize
+
+            sentences = sent_tokenize_preserving_markdown_code(stream["pending"], sent_tokenize)
+            if len(sentences) < 2:
+                return  # no whole sentence yet: the next delta or the final result speaks it
+            cut = stream["pending"].rindex(sentences[-1])
+            text, stream["pending"] = stream["pending"][:cut], stream["pending"][cut:]
+'''
+
+
+def stream_segment(text):
+    if text.count(STREAM_SEGMENT_OLD) != 1:
+        sys.exit("stream-segment anchor not found once - run the stream-results patch first")
+    return text.replace(STREAM_SEGMENT_OLD, STREAM_SEGMENT_NEW, 1)
+
+
+patch(ROOT / "api/openai_realtime/websocket_router.py", stream_segment, STREAM_SEGMENT_MARK)
