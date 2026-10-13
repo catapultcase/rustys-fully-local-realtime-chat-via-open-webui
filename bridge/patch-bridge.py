@@ -526,3 +526,23 @@ def stream_inband_history(text):
 
 patch(ROOT / "api/openai_realtime/websocket_router.py", stream_inband_router, STREAM_INBAND_MARK)
 patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_inband_history, STREAM_INBAND_MARK)
+
+
+# Tenth: the bridge says it handles streamed results. Open WebUI streams only to a provider that sends
+# openwebui_stream_results in session.updated: providers that don't know the delta event reject it, and Open WebUI
+# ends the call on any provider error (2026-10-13).
+STREAM_CAPABILITY_MARK = "HOMELAB PATCH stream-capability"
+STREAM_CAPABILITY_OLD = '''            await send_correlated([service.build_session_updated(session_id)])
+'''
+STREAM_CAPABILITY_NEW = f'''            updated = service.build_session_updated(session_id)  # {STREAM_CAPABILITY_MARK}
+            await send_correlated([type(updated).model_validate({{**updated.model_dump(), "openwebui_stream_results": True}})])
+'''
+
+
+def stream_capability(text):
+    if text.count(STREAM_CAPABILITY_OLD) != 1:
+        sys.exit("stream-capability anchor not found once - speech-to-speech changed; re-derive the patch")
+    return text.replace(STREAM_CAPABILITY_OLD, STREAM_CAPABILITY_NEW, 1)
+
+
+patch(ROOT / "api/openai_realtime/websocket_router.py", stream_capability, STREAM_CAPABILITY_MARK)
