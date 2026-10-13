@@ -496,3 +496,33 @@ def stream_segment(text):
 
 
 patch(ROOT / "api/openai_realtime/websocket_router.py", stream_segment, STREAM_SEGMENT_MARK)
+
+
+# Ninth: streamed sentences go into the voice model's history as they are spoken. They were out-of-band responses,
+# outside the conversation, so a follow-up asked before the final result was spoken met a voice model that had not
+# "said" the answer yet (follow-ups handed off 18/20 streamed against 20/20 unstreamed, 2026-10-13). In-band, each
+# sentence is an assistant message; the final result records only what is left, so history holds what was said.
+STREAM_INBAND_MARK = "HOMELAB PATCH stream-inband"
+STREAM_INBAND_ROUTER = ('''                        "conversation": "none",
+                        "metadata": {{"call_id": call_id, "openwebui_stream_text": text}},''',
+                        f'''                        "metadata": {{{{"call_id": call_id, "openwebui_stream_text": text}}}},  # {STREAM_INBAND_MARK}''')
+STREAM_INBAND_HISTORY = ('''                full = (getattr(response, "metadata", None) or {}).get("openwebui_full_answer") or direct  # ''',
+                         f'''                full = direct  # {STREAM_INBAND_MARK}: streamed sentences are in history already; was ''')
+
+
+def stream_inband_router(text):
+    old = STREAM_INBAND_ROUTER[0].replace("{{", "{").replace("}}", "}")
+    new = STREAM_INBAND_ROUTER[1].replace("{{", "{").replace("}}", "}")
+    if text.count(old) != 1:
+        sys.exit("stream-inband router anchor not found once - run the stream-results patch first")
+    return text.replace(old, new, 1)
+
+
+def stream_inband_history(text):
+    if text.count(STREAM_INBAND_HISTORY[0]) != 1:
+        sys.exit("stream-inband history anchor not found once - run the stream-history patch first")
+    return text.replace(STREAM_INBAND_HISTORY[0], STREAM_INBAND_HISTORY[1], 1)
+
+
+patch(ROOT / "api/openai_realtime/websocket_router.py", stream_inband_router, STREAM_INBAND_MARK)
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_inband_history, STREAM_INBAND_MARK)
