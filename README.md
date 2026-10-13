@@ -1,5 +1,10 @@
 # Rusty's Fully Local Realtime Chat via Open WebUI
 
+> **Branch `lookahead`:** the voice provider for streamed answers. Its `bridge/patch-bridge.py` also speaks the text
+> Open WebUI streams while the chat model writes, in whole sentences, and keeps it in the voice model's history. Use it
+> with Open WebUI built from [RustyRealTime's `lookahead` branch](https://github.com/catapultcase/RustyRealTime/tree/lookahead)
+> (streaming on in Admin → Audio). Everything else below is unchanged.
+
 Our setup for Open WebUI 0.12's **Realtime** call mode with no cloud anywhere. Small talk is answered
 at once, you can talk over it or mute it, and real questions go to your chat model with its tools,
 knowledge and history, and the answer is read back word for word. In daily use since 2026-10-11.
