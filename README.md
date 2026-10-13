@@ -120,6 +120,7 @@ Open WebUI ends the call on **any** error event from the provider ("Voice provid
 | Follow-up during a hand-off | the bridge refused a reply while a tool result was pending, so asking "is it running?" ended the call | answered on a per-response copy of the chat where the pending call reads "still working" |
 | Speaking a hand-off's answer | the voice model re-read the call and rewrote the answer, taking 1.2-1.6 s, and the result could drift | a completed answer goes straight to TTS: speech starts **~0.2 s** after the text lands, exactly as written. A failed result still goes to the model to explain |
 | History label | the chat model sometimes copied Open WebUI's `[Historical voice assistant transcript; not current task status]` into its answer, and it was read aloud | the line is dropped before speaking; it stays in the chat text |
+| Streamed results (opt-in) | – | speaks `openwebui.function_call_output.delta` sentences while the chat model writes, for Open WebUI built with [RustyRealTime](https://github.com/catapultcase/RustyRealTime)'s patch. Inert without it |
 
 ### Speech cleanup ([`servers/kokoro-server.py`](servers/kokoro-server.py))
 

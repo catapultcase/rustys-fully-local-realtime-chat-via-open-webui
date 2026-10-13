@@ -194,3 +194,142 @@ patch(ROOT / "LLM/language_model.py", lambda t: guards(t, 1))
 patch(ROOT / "api/openai_realtime/handlers/response.py", refusal)
 patch(ROOT / "api/openai_realtime/websocket_router.py", clear)
 patch(ROOT / "LLM/base_openai_compatible_language_model.py", direct, DIRECT_MARK)
+
+
+# Fourth: streamed results (RustyRealTime, github.com/catapultcase/RustyRealTime). With Open WebUI's opt-in
+# AUDIO_REALTIME_STREAM_RESULTS, the final text of a hand-off's answer arrives sentence by sentence as
+# openwebui.function_call_output.delta {call_id, delta} while the chat model writes it. Each batch is spoken as an
+# out-of-band response as soon as the bridge is free. The final function_call_output still carries the whole
+# answer: the response that speaks it skips everything up to the end of what was already spoken.
+STREAM_MARK = "HOMELAB PATCH stream-results"
+
+STREAM_ROUTER = f'''
+_HOMELAB_STREAMS: dict = {{}}  # {STREAM_MARK}: session_id -> call_id -> {{"pending", "spoken", "flushing"}}
+
+
+def _homelab_stream_delta(session_id, raw):
+    call_id, delta = raw.get("call_id"), raw.get("delta")
+    if not isinstance(call_id, str) or not isinstance(delta, str) or not delta:
+        return None
+    stream = _HOMELAB_STREAMS.setdefault(session_id, {{}}).setdefault(
+        call_id, {{"pending": "", "spoken": "", "flushing": False}}
+    )
+    stream["pending"] += delta
+    return stream
+
+
+def _homelab_stream_final(session_id, raw):
+    """The response that speaks a streamed call's final result learns what was already spoken."""
+    response = raw.get("response")
+    metadata = response.get("metadata") if isinstance(response, dict) else None
+    call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
+    stream = (_HOMELAB_STREAMS.get(session_id) or {{}}).pop(call_id, None) if call_id else None
+    if stream and stream["spoken"]:
+        metadata["openwebui_spoken"] = stream["spoken"]
+    if stream:
+        stream["pending"] = ""  # the final answer covers it
+
+
+async def _homelab_stream_flush(unit, session_id, call_id, stream, send_correlated):
+    """Speak pending sentences once no response is running; never sends an error (Open WebUI hangs up on one)."""
+    service = unit.service
+    try:
+        for _ in range(1200):
+            if not stream["pending"] or (_HOMELAB_STREAMS.get(session_id) or {{}}).get(call_id) is not stream:
+                return
+            st = service._state(session_id)
+            if st.in_response or st.response_pending:
+                await asyncio.sleep(0.05)
+                continue
+            text, stream["pending"] = stream["pending"], ""
+            event = service.parse_client_event(
+                {{
+                    "type": "response.create",
+                    "response": {{
+                        "conversation": "none",
+                        "metadata": {{"call_id": call_id, "openwebui_stream_text": text}},
+                    }},
+                }}
+            )
+            result = service.handle_response_create(session_id, event) if event is not None else None
+            if result is None or result.type == "error":
+                stream["pending"] = text + stream["pending"]
+                await asyncio.sleep(0.05)
+                continue
+            stream["spoken"] += text
+            unit.cancel_scope.new_response()
+            response_key = service._state(session_id).current_response_key
+            await send_correlated([result])
+            service.response.mark_response_created_sent(session_id, response_key)
+    finally:
+        stream["flushing"] = False
+
+
+async def _dispatch_client_event('''
+
+STREAM_DISPATCH = f'''    if raw.get("type") == "openwebui.function_call_output.delta":  # {STREAM_MARK}
+        stream = _homelab_stream_delta(session_id, raw)
+        if stream is not None and not stream["flushing"]:
+            stream["flushing"] = True
+            asyncio.create_task(_homelab_stream_flush(unit, session_id, raw["call_id"], stream, send_correlated))
+        return
+    if raw.get("type") == "response.create":  # {STREAM_MARK}
+        _homelab_stream_final(session_id, raw)
+
+    event = service.parse_client_event(raw)'''
+
+
+def stream_router(text):
+    head = "\n\nasync def _dispatch_client_event("
+    anchor = "\n    event = service.parse_client_event(raw)"
+    if text.count(head) != 1 or text.count(anchor) != 1 or "import asyncio" not in text:
+        sys.exit("stream-results router anchors not found once - speech-to-speech changed; re-derive the patch")
+    return text.replace(head, "\n" + STREAM_ROUTER, 1).replace(anchor, "\n" + STREAM_DISPATCH, 1)
+
+
+STREAM_HELPER_OLD = '''    metadata = getattr(response, "metadata", None) or {}
+    call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
+    if not call_id or getattr(response, "instructions", None):
+        return None
+'''
+STREAM_HELPER_NEW = f'''    metadata = getattr(response, "metadata", None) or {{}}
+    call_id = metadata.get("call_id") if isinstance(metadata, dict) else None
+    if not call_id or getattr(response, "instructions", None):
+        return None
+    streamed = metadata.get("openwebui_stream_text")  # {STREAM_MARK}: sentences of a still-streaming answer
+    if isinstance(streamed, str) and streamed:
+        return streamed
+    spoken = metadata.get("openwebui_spoken")  # {STREAM_MARK}: already said while it streamed
+'''
+STREAM_ANSWER_OLD = '''            if result.get("status") == "completed" and isinstance(answer, str) and answer:
+                return answer
+'''
+STREAM_ANSWER_NEW = f'''            if result.get("status") == "completed" and isinstance(answer, str) and answer:
+                if isinstance(spoken, str) and spoken:  # {STREAM_MARK}: speak only what follows it
+                    at = answer.find(spoken)
+                    if at >= 0:
+                        return answer[at + len(spoken):].strip()
+                return answer
+'''
+STREAM_EVENTS_OLD = '''            def _direct_events(_api_response):
+                yield TextDelta(text=direct)
+'''
+STREAM_EVENTS_NEW = f'''            def _direct_events(_api_response):
+                if direct:  # {STREAM_MARK}: a streamed answer can be fully spoken already
+                    yield TextDelta(text=direct)
+'''
+
+
+def stream_helper(text):
+    for old in (STREAM_HELPER_OLD, STREAM_ANSWER_OLD, STREAM_EVENTS_OLD):
+        if text.count(old) != 1:
+            sys.exit("stream-results helper anchors not found once - run the direct-answer patch first")
+    return (
+        text.replace(STREAM_HELPER_OLD, STREAM_HELPER_NEW, 1)
+        .replace(STREAM_ANSWER_OLD, STREAM_ANSWER_NEW, 1)
+        .replace(STREAM_EVENTS_OLD, STREAM_EVENTS_NEW, 1)
+    )
+
+
+patch(ROOT / "api/openai_realtime/websocket_router.py", stream_router, STREAM_MARK)
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_helper, STREAM_MARK)
