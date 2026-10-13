@@ -333,3 +333,71 @@ def stream_helper(text):
 
 patch(ROOT / "api/openai_realtime/websocket_router.py", stream_router, STREAM_MARK)
 patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_helper, STREAM_MARK)
+
+
+# Fifth: streamed text drops Open WebUI's history label too. Open WebUI shows the chat model earlier spoken replies
+# under "[Historical voice assistant transcript; not current task status]", and the model can open its own answer
+# with it; the direct-answer path already drops that line, the streamed path now does the same (2026-10-13).
+STREAM_LABEL_MARK = "HOMELAB PATCH stream-label"
+STREAM_LABEL_OLD = '''    if isinstance(streamed, str) and streamed:
+        return streamed
+'''
+STREAM_LABEL_NEW = f'''    if isinstance(streamed, str) and streamed:  # {STREAM_LABEL_MARK}: same history-label rule as a finished answer
+        streamed = "\\n".join(
+            line for line in streamed.splitlines(keepends=False)
+            if not line.strip().startswith("[Historical voice assistant transcript")
+        )
+        return streamed if streamed.strip() else ""
+'''
+STREAM_SPOKEN_OLD = '''    spoken = metadata.get("openwebui_spoken")  # {STREAM_MARK}: already said while it streamed
+'''
+STREAM_SPOKEN_NEW = f'''    spoken = metadata.get("openwebui_spoken")  # {STREAM_MARK}: already said while it streamed
+    if isinstance(spoken, str):  # {STREAM_LABEL_MARK}: compared with the answer after the same label rule
+        spoken = "\\n".join(
+            line for line in spoken.splitlines() if not line.strip().startswith("[Historical voice assistant transcript")
+        ).strip()
+'''
+
+
+def stream_label(text):
+    for old in (STREAM_LABEL_OLD, STREAM_SPOKEN_OLD.format(STREAM_MARK=STREAM_MARK)):
+        if text.count(old) != 1:
+            sys.exit("stream-label anchors not found once - run the stream-results patch first")
+    return text.replace(STREAM_LABEL_OLD, STREAM_LABEL_NEW, 1).replace(
+        STREAM_SPOKEN_OLD.format(STREAM_MARK=STREAM_MARK), STREAM_SPOKEN_NEW, 1
+    )
+
+
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_label, STREAM_LABEL_MARK)
+
+
+# Sixth: a streamed answer keeps its whole text in the voice model's history. The streamed sentences are spoken in
+# out-of-band responses, which stay out of the conversation, and the final result's response then speaks only the
+# rest, often nothing. Its assistant message was that rest, so the voice model's own history showed an empty reply
+# after the chat model's answer, and it later answered "check online" itself (2026-10-13). The final response now
+# records the whole answer, as it did before streaming, and speaks only what was not said yet.
+STREAM_HISTORY_MARK = "HOMELAB PATCH stream-history"
+STREAM_HISTORY_ANSWER_OLD = '''                    if at >= 0:
+                        return answer[at + len(spoken):].strip()
+'''
+STREAM_HISTORY_ANSWER_NEW = f'''                    if at >= 0:
+                        metadata["openwebui_full_answer"] = answer  # {STREAM_HISTORY_MARK}
+                        return answer[at + len(spoken):].strip()
+'''
+STREAM_HISTORY_EVENTS_OLD = '''                yield AssistantMessage(content=[_Content(type="output_text", text=direct)])
+'''
+STREAM_HISTORY_EVENTS_NEW = f'''                full = (getattr(response, "metadata", None) or {{}}).get("openwebui_full_answer") or direct  # {STREAM_HISTORY_MARK}
+                yield AssistantMessage(content=[_Content(type="output_text", text=full)])
+'''
+
+
+def stream_history(text):
+    for old in (STREAM_HISTORY_ANSWER_OLD, STREAM_HISTORY_EVENTS_OLD):
+        if text.count(old) != 1:
+            sys.exit("stream-history anchors not found once - run the stream-results patch first")
+    return text.replace(STREAM_HISTORY_ANSWER_OLD, STREAM_HISTORY_ANSWER_NEW, 1).replace(
+        STREAM_HISTORY_EVENTS_OLD, STREAM_HISTORY_EVENTS_NEW, 1
+    )
+
+
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_history, STREAM_HISTORY_MARK)
