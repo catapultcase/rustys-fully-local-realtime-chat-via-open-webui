@@ -120,7 +120,7 @@ Open WebUI ends the call on **any** error event from the provider ("Voice provid
 | Follow-up during a hand-off | the bridge refused a reply while a tool result was pending, so asking "is it running?" ended the call | answered on a per-response copy of the chat where the pending call reads "still working" |
 | Speaking a hand-off's answer | the voice model re-read the call and rewrote the answer, taking 1.2-1.6 s, and the result could drift | a completed answer goes straight to TTS: speech starts **~0.2 s** after the text lands, exactly as written. A failed result still goes to the model to explain |
 | History label | the chat model sometimes copied Open WebUI's `[Historical voice assistant transcript; not current task status]` into its answer, and it was read aloud | the line is dropped before speaking; it stays in the chat text |
-| Streamed results (opt-in) | – | speaks `openwebui.function_call_output.delta` sentences while the chat model writes, for Open WebUI built with [RustyRealTime](https://github.com/catapultcase/RustyRealTime)'s patch. Inert without it |
+| Streamed results (opt-in) | – | speaks `openwebui.function_call_output.delta` sentences while the chat model writes, for Open WebUI built with [RustyRealTime](https://github.com/catapultcase/RustyRealTime)'s patch: the final result then speaks only what is left, the whole answer stays in the voice model's history, the history label is dropped, and talking over the answer stops the rest of it. Inert without it |
 
 ### Speech cleanup ([`servers/kokoro-server.py`](servers/kokoro-server.py))
 
@@ -149,10 +149,13 @@ beside the speech models on 12 GB. On a 24-32 GB card it would.
 
 ## Limits
 
-- **Speech starts only when the chat model's answer is complete.** Open WebUI sends the hand-off result
-  to the voice side only once it's finished, so a long answer means silence while the text writes itself
-  into the chat. Requested upstream: [open-webui#32311](https://github.com/open-webui/open-webui/issues/32311),
-  stream partial results so speech starts on the first sentence.
+- **Speech starts only when the chat model's answer is complete** on stock Open WebUI, so a long answer means
+  silence while the text writes itself into the chat. A working opt-in fix, speech starting on the first
+  sentences while the chat model writes, is in [RustyRealTime](https://github.com/catapultcase/RustyRealTime) and
+  proposed upstream in [open-webui#32311](https://github.com/open-webui/open-webui/issues/32311). Until it is
+  merged it needs a patched Open WebUI build. A call on it:
+
+  https://github.com/user-attachments/assets/dd96054b-d518-41f0-b179-80e6e99884dc
 - **One call at a time**; the bridge refuses a second.
 - Parakeet's weak spot is unusual names.
 - Tested only on x86 Linux with NVIDIA.
