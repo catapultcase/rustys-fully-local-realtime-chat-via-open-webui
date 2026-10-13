@@ -401,3 +401,73 @@ def stream_history(text):
 
 
 patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_history, STREAM_HISTORY_MARK)
+
+
+# Seventh: talking over a streamed answer stops it. The bridge's own barge-in cancels the response that is playing,
+# but the rest of the answer kept arriving as deltas and each was spoken (2026-10-13). Once the user starts speaking
+# over a streamed answer, that answer's remaining deltas are dropped and its final result speaks nothing; the whole
+# answer still goes into the voice model's history.
+STREAM_INTERRUPT_MARK = "HOMELAB PATCH stream-interrupt"
+STREAM_INTERRUPT_FN = f'''
+
+def _homelab_stream_interrupt(session_id):
+    """{STREAM_INTERRUPT_MARK}: the user talked over a streamed answer, so speak no more of it."""
+    for stream in (_HOMELAB_STREAMS.get(session_id) or {{}}).values():
+        if stream["spoken"]:
+            stream["interrupted"] = True
+            stream["pending"] = ""
+
+
+async def _dispatch_client_event('''
+STREAM_INTERRUPT_EDITS = [
+    ('''    stream["pending"] += delta
+    return stream
+''', f'''    if stream.get("interrupted"):  # {STREAM_INTERRUPT_MARK}
+        return None
+    stream["pending"] += delta
+    return stream
+'''),
+    ('''    if stream and stream["spoken"]:
+        metadata["openwebui_spoken"] = stream["spoken"]
+''', f'''    if stream and stream["spoken"]:
+        metadata["openwebui_spoken"] = stream["spoken"]
+    if stream and stream.get("interrupted"):  # {STREAM_INTERRUPT_MARK}
+        metadata["openwebui_interrupted"] = "1"
+'''),
+    ('''                        if interrupt_enabled and transport is not None:
+                            # Flush even when no response is active''', f'''                        if interrupt_enabled:  # {STREAM_INTERRUPT_MARK}
+                            _homelab_stream_interrupt(session_id)
+                        if interrupt_enabled and transport is not None:
+                            # Flush even when no response is active'''),
+]
+STREAM_INTERRUPT_HELPER = (
+    f'''                if isinstance(spoken, str) and spoken:  # {STREAM_MARK}: speak only what follows it
+''',
+    f'''                if metadata.get("openwebui_interrupted"):  # {STREAM_INTERRUPT_MARK}: talked over, say no more
+                    metadata["openwebui_full_answer"] = answer
+                    return ""
+                if isinstance(spoken, str) and spoken:  # {STREAM_MARK}: speak only what follows it
+''',
+)
+
+
+def stream_interrupt_router(text):
+    head = "\n\nasync def _dispatch_client_event("
+    edits = [(head, STREAM_INTERRUPT_FN)] + STREAM_INTERRUPT_EDITS
+    for old, _ in edits:
+        if text.count(old) != 1:
+            sys.exit("stream-interrupt router anchors not found once - run the stream-results patch first")
+    for old, new in edits:
+        text = text.replace(old, new, 1)
+    return text
+
+
+def stream_interrupt_helper(text):
+    old, new = STREAM_INTERRUPT_HELPER
+    if text.count(old) != 1:
+        sys.exit("stream-interrupt helper anchor not found once - run the stream-results patch first")
+    return text.replace(old, new, 1)
+
+
+patch(ROOT / "api/openai_realtime/websocket_router.py", stream_interrupt_router, STREAM_INTERRUPT_MARK)
+patch(ROOT / "LLM/base_openai_compatible_language_model.py", stream_interrupt_helper, STREAM_INTERRUPT_MARK)
