@@ -2,7 +2,7 @@
 
 > **Branch `lookahead`:** the voice provider for streamed answers. Its `bridge/patch-bridge.py` also speaks the text
 > Open WebUI streams while the chat model writes, in whole sentences, and keeps it in the voice model's history. Use it
-> with Open WebUI built from [RustyRealTime's `lookahead` branch](https://github.com/catapultcase/RustyRealTime/tree/lookahead)
+> with Open WebUI v0.12.3 built from [RustyRealTime's `lookahead` branch](https://github.com/catapultcase/RustyRealTime/tree/lookahead)
 > (streaming on in Admin → Audio). The request was closed upstream (open-webui#32311), so this stays a personal patch.
 > Everything else below is unchanged.
 
